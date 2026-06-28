@@ -93,6 +93,7 @@ app.post('/send', async (req, res) => {
 // Porta: Railway imposta process.env.PORT
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
+// IMPORTANTE: bind su 0.0.0.0 per Railway
+app.listen(PORT, '0.0.0.0', () => {
   console.log('agenda-push-backend in ascolto sulla porta', PORT);
 });
