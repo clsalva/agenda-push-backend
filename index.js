@@ -26,10 +26,6 @@ if (publicVapidKey && privateVapidKey) {
 }
 
 // --- APP_TOKEN: segreto condiviso che protegge i tuoi dati ---
-// Ogni richiesta (tranne il cron) deve includere l'header  x-app-token
-// con lo stesso valore configurato su Render. Usiamo questo stesso valore
-// come chiave di partizione nel DB: tutti i browser che usano lo stesso
-// token vedono e sincronizzano la stessa agenda.
 const APP_TOKEN = process.env.APP_TOKEN;
 if (!APP_TOKEN) {
   console.warn('ATTENZIONE: APP_TOKEN non impostato. Il backend rifiuterà tutte le richieste autenticate.');
@@ -51,7 +47,6 @@ app.get('/', (req, res) => {
 
 // --- Sincronizzazione dati (appuntamenti + task) ---
 
-// Legge lo stato salvato per questo token
 app.get('/api/items', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -68,7 +63,6 @@ app.get('/api/items', requireAuth, async (req, res) => {
   }
 });
 
-// Salva (sovrascrive) lo stato per questo token
 app.put('/api/items', requireAuth, async (req, res) => {
   const { appointments, tasks } = req.body || {};
   if (!Array.isArray(appointments) || !Array.isArray(tasks)) {
@@ -121,7 +115,6 @@ app.post('/api/unsubscribe', requireAuth, async (req, res) => {
   }
 });
 
-// Invio manuale di una notifica di test a tutte le subscription di un token
 app.post('/api/send-test', requireAuth, async (req, res) => {
   if (!publicVapidKey || !privateVapidKey) {
     return res.status(500).json({ ok: false, error: 'VAPID non configurato' });
@@ -151,9 +144,6 @@ app.post('/api/send-test', requireAuth, async (req, res) => {
 });
 
 // --- Scheduler dei reminder ---
-// Chiamato da un cron ESTERNO (cron-job.org) ogni 5 minuti, non dal browser.
-// Protetto da un secret separato (CRON_SECRET) passato come query string,
-// perché il servizio di cron non può mandare header custom facilmente.
 app.get('/api/cron/check-reminders', async (req, res) => {
   const secret = req.query.secret;
   if (!process.env.CRON_SECRET || secret !== process.env.CRON_SECRET) {
@@ -182,8 +172,6 @@ app.get('/api/cron/check-reminders', async (req, res) => {
 
       if (due.length === 0) continue;
 
-      // Filtra quelli già notificati (filtro lato JS per evitare problemi
-      // di compatibilità con ANY($array) su alcuni driver/proxy Postgres)
       const { rows: already } = await pool.query(
         'select item_id from sent_reminders where token = $1',
         [state.token]
@@ -208,7 +196,6 @@ app.get('/api/cron/check-reminders', async (req, res) => {
           subs.map((s) =>
             webpush.sendNotification(s.subscription, payload).catch((err) => {
               console.error('Errore invio push reminder:', err.message);
-              // Se la subscription non è più valida, la rimuoviamo
               if (err.statusCode === 404 || err.statusCode === 410) {
                 pool.query('delete from push_subscriptions where subscription = $1', [
                   JSON.stringify(s.subscription)
