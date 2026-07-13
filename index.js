@@ -24,6 +24,7 @@ if (publicVapidKey && privateVapidKey) {
 }
 
 const APP_TOKEN = process.env.APP_TOKEN;
+
 function requireAuth(req, res, next) {
   const token = req.header('x-app-token');
   if (!APP_TOKEN || !token || token !== APP_TOKEN) {
@@ -49,20 +50,32 @@ function parseData(data) {
   return data;
 }
 
+function normalizeReminder(value) {
+  return value || '';
+}
+
+function allReminderItems(data) {
+  const parsed = parseData(data);
+  return [
+    ...(parsed.appointments || []).map((i) => ({ ...i, kind: 'appuntamento' })),
+    ...(parsed.tasks || []).map((i) => ({ ...i, kind: 'task' }))
+  ];
+}
+
 function parseReminderAt(value) {
   if (!value) return null;
-  // OK: formato UTC o con offset, es. 2026-07-09T15:30:00.000Z oppure +02:00
   if (/Z$|[+-]\d{2}:\d{2}$/.test(value)) {
     const d = new Date(value);
     return Number.isNaN(d.getTime()) ? null : d;
   }
-  // Compatibilita': vecchi valori datetime-local senza timezone.
-  // Nota: su Render il timezone e' spesso UTC. Per evitare falsi ritardi,
-  // interpreta il valore come orario locale Europa/Roma approssimato tramite offset configurabile.
   const offsetMinutes = Number(process.env.LOCAL_TZ_OFFSET_MINUTES || 120);
-  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  const m = String(value).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
   if (!m) return null;
-  const [, y, mo, d, h, mi] = m.map(Number);
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const h = Number(m[4]);
+  const mi = Number(m[5]);
   return new Date(Date.UTC(y, mo - 1, d, h, mi) - offsetMinutes * 60 * 1000);
 }
 
@@ -84,7 +97,7 @@ async function sendToSubscription(row, payload) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ ok: true, service: 'agenda-push-backend', version: '2.1.0' });
+  res.json({ ok: true, service: 'agenda-push-backend', version: '2.2.0' });
 });
 
 app.get('/api/items', requireAuth, async (req, res) => {
@@ -108,17 +121,51 @@ app.put('/api/items', requireAuth, async (req, res) => {
   if (!Array.isArray(appointments) || !Array.isArray(tasks)) {
     return res.status(400).json({ ok: false, error: 'appointments e tasks devono essere array' });
   }
+
+  const client = await pool.connect();
   try {
-    await pool.query(
+    await client.query('begin');
+
+    const { rows } = await client.query(
+      'select data from sync_state where token = $1 for update',
+      [req.token]
+    );
+
+    const oldItems = allReminderItems(rows[0]?.data);
+    const oldById = new Map(oldItems.filter((i) => i.id).map((i) => [i.id, i]));
+    const newItems = [...appointments, ...tasks].filter((i) => i && i.id);
+
+    const changedReminderIds = [];
+    for (const item of newItems) {
+      const old = oldById.get(item.id);
+      if (!old) continue;
+      const oldReminder = normalizeReminder(old.reminderAt);
+      const newReminder = normalizeReminder(item.reminderAt);
+      if (oldReminder !== newReminder) changedReminderIds.push(item.id);
+    }
+
+    if (changedReminderIds.length > 0) {
+      await client.query(
+        'delete from sent_reminders where token = $1 and item_id = any($2::text[])',
+        [req.token, changedReminderIds]
+      );
+    }
+
+    await client.query(
       `insert into sync_state (token, data, updated_at)
        values ($1, $2::jsonb, now())
        on conflict (token) do update set data = $2::jsonb, updated_at = now()`,
       [req.token, JSON.stringify({ appointments, tasks })]
     );
-    res.json({ ok: true });
+
+    await client.query('commit');
+    res.json({ ok: true, resetSentReminders: changedReminderIds.length });
   } catch (err) {
+    await client.query('rollback');
     console.error('Errore PUT /api/items', err);
     res.status(500).json({ ok: false, error: 'Errore salvataggio dati' });
+  } finally {
+    client.release();
   }
 });
 
@@ -129,9 +176,9 @@ app.post('/api/subscribe', requireAuth, async (req, res) => {
   }
   try {
     await pool.query(
-      `insert into push_subscriptions (endpoint, token, subscription, updated_at)
-       values ($1, $2, $3::jsonb, now())
-       on conflict (endpoint) do update set subscription = $3::jsonb, token = $2, updated_at = now()`,
+      `insert into push_subscriptions (endpoint, token, subscription)
+       values ($1, $2, $3::jsonb)
+       on conflict (endpoint) do update set subscription = $3::jsonb, token = $2`,
       [subscription.endpoint, req.token, JSON.stringify(subscription)]
     );
     res.status(201).json({ ok: true });
@@ -193,18 +240,12 @@ app.get('/api/cron/check-reminders', requireCronSecret, async (req, res) => {
     const { rows: states } = await pool.query('select token, data from sync_state');
 
     for (const stateRow of states) {
-      const data = parseData(stateRow.data);
-      const items = [
-        ...(data.appointments || []).map((i) => ({ ...i, kind: 'appuntamento' })),
-        ...(data.tasks || []).map((i) => ({ ...i, kind: 'task' }))
-      ];
-
+      const items = allReminderItems(stateRow.data);
       const due = items.filter((item) => {
         const reminderDate = parseReminderAt(item.reminderAt);
         return item.id && reminderDate && reminderDate.getTime() <= now;
       });
       remindersFound += due.length;
-
       if (due.length === 0) continue;
 
       const { rows: subs } = await pool.query(
@@ -238,12 +279,11 @@ app.get('/api/cron/check-reminders', requireCronSecret, async (req, res) => {
         const okCount = results.filter((r) => r.ok).length;
         notificationsSent += okCount;
 
-        // Marca come inviato solo se almeno una push e' partita davvero.
         if (okCount > 0) {
           await pool.query(
             `insert into sent_reminders (token, item_id, sent_at)
              values ($1, $2, now())
-             on conflict (token, item_id) do nothing`,
+             on conflict do nothing`,
             [stateRow.token, item.id]
           );
         }
@@ -269,5 +309,5 @@ app.get('/api/cron/check-reminders', requireCronSecret, async (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log('agenda-push-backend v2.1 in ascolto sulla porta', PORT);
+  console.log('agenda-push-backend v2.2 in ascolto sulla porta', PORT);
 });
