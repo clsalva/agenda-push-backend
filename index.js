@@ -1,3 +1,5 @@
+/* versione 2.3 */
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -24,7 +26,6 @@ if (publicVapidKey && privateVapidKey) {
 }
 
 const APP_TOKEN = process.env.APP_TOKEN;
-
 function requireAuth(req, res, next) {
   const token = req.header('x-app-token');
   if (!APP_TOKEN || !token || token !== APP_TOKEN) {
@@ -50,10 +51,6 @@ function parseData(data) {
   return data;
 }
 
-function normalizeReminder(value) {
-  return value || '';
-}
-
 function allReminderItems(data) {
   const parsed = parseData(data);
   return [
@@ -71,19 +68,11 @@ function parseReminderAt(value) {
   const offsetMinutes = Number(process.env.LOCAL_TZ_OFFSET_MINUTES || 120);
   const m = String(value).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
   if (!m) return null;
-  const y = Number(m[1]);
-  const mo = Number(m[2]);
-  const d = Number(m[3]);
-  const h = Number(m[4]);
-  const mi = Number(m[5]);
-  return new Date(Date.UTC(y, mo - 1, d, h, mi) - offsetMinutes * 60 * 1000);
+  return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) - offsetMinutes * 60 * 1000);
 }
 
 async function sendToSubscription(row, payload) {
-  const subscription = typeof row.subscription === 'string'
-    ? JSON.parse(row.subscription)
-    : row.subscription;
-
+  const subscription = typeof row.subscription === 'string' ? JSON.parse(row.subscription) : row.subscription;
   try {
     await webpush.sendNotification(subscription, payload);
     return { ok: true };
@@ -96,19 +85,31 @@ async function sendToSubscription(row, payload) {
   }
 }
 
-app.get('/', (req, res) => {
-  res.json({ ok: true, service: 'agenda-push-backend', version: '2.2.0' });
-});
+async function notifyOtherDevices(token, sourceEndpoint) {
+  const { rows } = await pool.query(
+    'select endpoint, subscription from push_subscriptions where token = $1',
+    [token]
+  );
+  const targets = sourceEndpoint ? rows.filter((r) => r.endpoint !== sourceEndpoint) : rows;
+  if (targets.length === 0) return { subscriptions: rows.length, syncPushSent: 0 };
+
+  const payload = JSON.stringify({
+    type: 'sync',
+    title: 'Agenda aggiornata',
+    body: 'Sono disponibili aggiornamenti da un altro dispositivo.',
+    url: './index.html',
+    tag: 'agenda-sync'
+  });
+  const results = await Promise.all(targets.map((r) => sendToSubscription(r, payload)));
+  return { subscriptions: rows.length, syncPushSent: results.filter((r) => r.ok).length };
+}
+
+app.get('/', (req, res) => res.json({ ok: true, service: 'agenda-push-backend', version: '2.3.0' }));
 
 app.get('/api/items', requireAuth, async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      'select data, updated_at from sync_state where token = $1',
-      [req.token]
-    );
-    if (rows.length === 0) {
-      return res.json({ ok: true, data: { appointments: [], tasks: [] }, updatedAt: null });
-    }
+    const { rows } = await pool.query('select data, updated_at from sync_state where token = $1', [req.token]);
+    if (rows.length === 0) return res.json({ ok: true, data: { appointments: [], tasks: [] }, updatedAt: null });
     res.json({ ok: true, data: parseData(rows[0].data), updatedAt: rows[0].updated_at });
   } catch (err) {
     console.error('Errore GET /api/items', err);
@@ -122,27 +123,23 @@ app.put('/api/items', requireAuth, async (req, res) => {
     return res.status(400).json({ ok: false, error: 'appointments e tasks devono essere array' });
   }
 
+  const sourceEndpoint = req.header('x-source-endpoint') || '';
   const client = await pool.connect();
+  let changedReminderIds = [];
+
   try {
     await client.query('begin');
+    const { rows } = await client.query('select data from sync_state where token = $1 for update', [req.token]);
 
-    const { rows } = await client.query(
-      'select data from sync_state where token = $1 for update',
-      [req.token]
-    );
-
-    const oldItems = allReminderItems(rows[0]?.data);
-    const oldById = new Map(oldItems.filter((i) => i.id).map((i) => [i.id, i]));
+    const oldById = new Map(allReminderItems(rows[0]?.data).filter((i) => i.id).map((i) => [i.id, i]));
     const newItems = [...appointments, ...tasks].filter((i) => i && i.id);
 
-    const changedReminderIds = [];
-    for (const item of newItems) {
-      const old = oldById.get(item.id);
-      if (!old) continue;
-      const oldReminder = normalizeReminder(old.reminderAt);
-      const newReminder = normalizeReminder(item.reminderAt);
-      if (oldReminder !== newReminder) changedReminderIds.push(item.id);
-    }
+    changedReminderIds = newItems
+      .filter((item) => {
+        const old = oldById.get(item.id);
+        return old && (old.reminderAt || '') !== (item.reminderAt || '');
+      })
+      .map((item) => item.id);
 
     if (changedReminderIds.length > 0) {
       await client.query(
@@ -159,14 +156,17 @@ app.put('/api/items', requireAuth, async (req, res) => {
     );
 
     await client.query('commit');
-    res.json({ ok: true, resetSentReminders: changedReminderIds.length });
   } catch (err) {
     await client.query('rollback');
     console.error('Errore PUT /api/items', err);
     res.status(500).json({ ok: false, error: 'Errore salvataggio dati' });
+    return;
   } finally {
     client.release();
   }
+
+  const syncPush = await notifyOtherDevices(req.token, sourceEndpoint);
+  res.json({ ok: true, resetSentReminders: changedReminderIds.length, ...syncPush });
 });
 
 app.post('/api/subscribe', requireAuth, async (req, res) => {
@@ -181,7 +181,7 @@ app.post('/api/subscribe', requireAuth, async (req, res) => {
        on conflict (endpoint) do update set subscription = $3::jsonb, token = $2`,
       [subscription.endpoint, req.token, JSON.stringify(subscription)]
     );
-    res.status(201).json({ ok: true });
+    res.status(201).json({ ok: true, endpoint: subscription.endpoint });
   } catch (err) {
     console.error('Errore POST /api/subscribe', err);
     res.status(500).json({ ok: false, error: 'Errore salvataggio subscription' });
@@ -201,20 +201,10 @@ app.post('/api/unsubscribe', requireAuth, async (req, res) => {
 });
 
 app.post('/api/send-test', requireAuth, async (req, res) => {
-  if (!publicVapidKey || !privateVapidKey) {
-    return res.status(500).json({ ok: false, error: 'VAPID non configurato' });
-  }
+  if (!publicVapidKey || !privateVapidKey) return res.status(500).json({ ok: false, error: 'VAPID non configurato' });
   try {
-    const { rows } = await pool.query(
-      'select endpoint, subscription from push_subscriptions where token = $1',
-      [req.token]
-    );
-    const payload = JSON.stringify({
-      title: req.body?.title || 'Agenda Todo',
-      body: req.body?.body || 'Notifica di prova dal backend.',
-      url: './index.html',
-      tag: 'backend-test'
-    });
+    const { rows } = await pool.query('select endpoint, subscription from push_subscriptions where token = $1', [req.token]);
+    const payload = JSON.stringify({ title: req.body?.title || 'Agenda Todo', body: req.body?.body || 'Notifica di prova dal backend.', url: './index.html', tag: 'backend-test' });
     const results = await Promise.all(rows.map((r) => sendToSubscription(r, payload)));
     res.json({ ok: true, subscriptions: rows.length, sent: results.filter((r) => r.ok).length });
   } catch (err) {
@@ -224,83 +214,57 @@ app.post('/api/send-test', requireAuth, async (req, res) => {
 });
 
 app.get('/api/cron/check-reminders', requireCronSecret, async (req, res) => {
-  if (!publicVapidKey || !privateVapidKey) {
-    return res.status(500).json({ ok: false, error: 'VAPID non configurato' });
-  }
+  if (!publicVapidKey || !privateVapidKey) return res.status(500).json({ ok: false, error: 'VAPID non configurato' });
 
   const debug = req.query.debug === '1';
   const now = Date.now();
-  let remindersFound = 0;
-  let remindersAlreadySent = 0;
-  let remindersWithoutSubscriptions = 0;
-  let notificationsSent = 0;
+  let remindersFound = 0, remindersAlreadySent = 0, remindersWithoutSubscriptions = 0, notificationsSent = 0;
   const details = [];
 
   try {
     const { rows: states } = await pool.query('select token, data from sync_state');
-
     for (const stateRow of states) {
-      const items = allReminderItems(stateRow.data);
-      const due = items.filter((item) => {
+      const due = allReminderItems(stateRow.data).filter((item) => {
         const reminderDate = parseReminderAt(item.reminderAt);
         return item.id && reminderDate && reminderDate.getTime() <= now;
       });
       remindersFound += due.length;
       if (due.length === 0) continue;
 
-      const { rows: subs } = await pool.query(
-        'select endpoint, subscription from push_subscriptions where token = $1',
-        [stateRow.token]
-      );
-
+      const { rows: subs } = await pool.query('select endpoint, subscription from push_subscriptions where token = $1', [stateRow.token]);
       if (subs.length === 0) {
         remindersWithoutSubscriptions += due.length;
         if (debug) details.push({ token: stateRow.token, due: due.length, subscriptions: 0 });
         continue;
       }
 
-      const { rows: already } = await pool.query(
-        'select item_id from sent_reminders where token = $1',
-        [stateRow.token]
-      );
+      const { rows: already } = await pool.query('select item_id from sent_reminders where token = $1', [stateRow.token]);
       const alreadySet = new Set(already.map((r) => r.item_id));
       const toSend = due.filter((d) => !alreadySet.has(d.id));
       remindersAlreadySent += due.length - toSend.length;
 
       for (const item of toSend) {
         const payload = JSON.stringify({
+          type: 'reminder',
           title: item.title || 'Promemoria',
           body: item.notes || (item.kind === 'appuntamento' ? 'Hai un appuntamento in agenda.' : 'Hai un task da completare.'),
           url: './index.html',
           tag: `reminder-${item.id}`
         });
-
         const results = await Promise.all(subs.map((s) => sendToSubscription(s, payload)));
         const okCount = results.filter((r) => r.ok).length;
         notificationsSent += okCount;
-
         if (okCount > 0) {
           await pool.query(
-            `insert into sent_reminders (token, item_id, sent_at)
-             values ($1, $2, now())
-             on conflict do nothing`,
+            `insert into sent_reminders (token, item_id, sent_at) values ($1, $2, now()) on conflict do nothing`,
             [stateRow.token, item.id]
           );
         }
-
         if (debug) details.push({ itemId: item.id, title: item.title, subscriptions: subs.length, sent: okCount });
       }
     }
 
-    res.json({
-      ok: true,
-      remindersFound,
-      remindersAlreadySent,
-      remindersWithoutSubscriptions,
-      notificationsSent,
-      remindersSent: notificationsSent,
-      ...(debug ? { details } : {})
-    });
+    res.json({ ok: true, remindersFound, remindersAlreadySent, remindersWithoutSubscriptions, notificationsSent, remindersSent: notificationsSent, ...(debug ? { details } : {}) });
   } catch (err) {
     console.error('Errore GET /api/cron/check-reminders', err);
     res.status(500).json({ ok: false, error: 'Errore controllo reminder' });
@@ -308,6 +272,4 @@ app.get('/api/cron/check-reminders', requireCronSecret, async (req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log('agenda-push-backend v2.2 in ascolto sulla porta', PORT);
-});
+app.listen(PORT, '0.0.0.0', () => console.log('agenda-push-backend v2.3 in ascolto sulla porta', PORT));
