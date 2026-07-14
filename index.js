@@ -128,11 +128,11 @@ app.get('/api/items', requireAuth, async (req, res) => {
 
   console.log('=== GET /api/items ===');
   console.log('TOKEN:', req.token);
-  console.log('RAW ROW:', JSON.stringify(rows[0], null, 2));
+  console.log('ROWS:', JSON.stringify(rows, null, 2));
 
   return res.json({
     debug: true,
-    row: rows[0]
+    rows
   });
 });
 
