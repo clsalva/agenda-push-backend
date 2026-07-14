@@ -126,13 +126,21 @@ app.get('/api/items', requireAuth, async (req, res) => {
     [req.token]
   );
 
-  console.log('=== GET /api/items ===');
-  console.log('TOKEN:', req.token);
-  console.log('ROWS:', JSON.stringify(rows, null, 2));
+  if(rows.length === 0){
+    return res.json({
+      ok: true,
+      data: {
+        appointments: [],
+        tasks: []
+      },
+      updatedAt: null
+    });
+  }
 
   return res.json({
-    debug: true,
-    rows
+    ok: true,
+    data: rows[0].data,
+    updatedAt: rows[0].updated_at
   });
 });
 
