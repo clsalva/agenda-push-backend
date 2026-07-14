@@ -1,7 +1,7 @@
 /* versione 2.3 */
 
 require('dotenv').config();
-
+console.log('BACKEND VERSION 20260714-A');
 console.log('=== BACKEND START ===');
 console.log(
   'DATABASE_URL:',
@@ -112,8 +112,12 @@ async function notifyOtherDevices(token, sourceEndpoint) {
   return { subscriptions: rows.length, syncPushSent: results.filter((r) => r.ok).length };
 }
 
-app.get('/', (req, res) => res.json({ ok: true, service: 'agenda-push-backend', version: '2.3.0' }));
-
+app.get('/', (req, res) => {
+  res.json({
+    version: 'TEST-20260714-A',
+    ts: new Date().toISOString()
+  });
+});
 
 app.get('/api/items', requireAuth, async (req, res) => {
 
