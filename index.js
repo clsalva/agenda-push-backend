@@ -1,7 +1,6 @@
 /* versione 2.3 */
 
 require('dotenv').config();
-console.log('BACKEND VERSION 20260714-A');
 console.log('=== BACKEND START ===');
 console.log(
   'DATABASE_URL:',
@@ -311,4 +310,4 @@ app.get('/api/cron/check-reminders', requireCronSecret, async (req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, '0.0.0.0', () => console.log('agenda-push-backend v2.3 in ascolto sulla porta', PORT));
+app.listen(PORT, '0.0.0.0', () => console.log('agenda-push-backend v2.4 in ascolto sulla porta', PORT));
