@@ -121,46 +121,19 @@ app.get('/', (req, res) => {
 
 app.get('/api/items', requireAuth, async (req, res) => {
 
-  return res.json({
-  TEST: 'GET-VERSION-20260714',
-  ts: new Date().toISOString()
-});
-  try {
-const { rows } = await pool.query(
-  'select data, updated_at from sync_state where token = $1',
-  [req.token]
-);
-
-console.log('RAW ROW:', JSON.stringify(rows[0], null, 2));
-
-return res.json({
-  debug: true,
-  row: rows[0]
-});
-console.log('=== GET /api/items ===');
-console.log('TOKEN:', req.token);
-
-if(rows.length > 0){
-  const appointments =
-    rows[0].data?.appointments ||
-    JSON.parse(rows[0].data || '{}').appointments ||
-    [];
-
-  console.log('UPDATED_AT:', rows[0].updated_at);
-  console.log('APPOINTMENTS_COUNT:', appointments.length);
-  console.log(
-    'APPOINTMENTS_TITLES:',
-    appointments.map(x => x.title)
+  const { rows } = await pool.query(
+    'select data, updated_at from sync_state where token = $1',
+    [req.token]
   );
-} else {
-  console.log('NO ROW FOUND');
-}
-    if (rows.length === 0) return res.json({ ok: true, data: { appointments: [], tasks: [] }, updatedAt: null });
-    res.json({ ok: true, data: parseData(rows[0].data), updatedAt: rows[0].updated_at });
-  } catch (err) {
-    console.error('Errore GET /api/items', err);
-    res.status(500).json({ ok: false, error: 'Errore lettura dati' });
-  }
+
+  console.log('=== GET /api/items ===');
+  console.log('TOKEN:', req.token);
+  console.log('RAW ROW:', JSON.stringify(rows[0], null, 2));
+
+  return res.json({
+    debug: true,
+    row: rows[0]
+  });
 });
 
 app.put('/api/items', requireAuth, async (req, res) => {
