@@ -1,6 +1,14 @@
 /* versione 2.3 */
 
 require('dotenv').config();
+
+console.log('=== BACKEND START ===');
+console.log(
+  'DATABASE_URL:',
+  process.env.DATABASE_URL
+    ? process.env.DATABASE_URL.replace(/:[^:@]+@/, ':***@')
+    : 'MISSING'
+);
 const express = require('express');
 const cors = require('cors');
 const webpush = require('web-push');
@@ -109,6 +117,25 @@ app.get('/', (req, res) => res.json({ ok: true, service: 'agenda-push-backend', 
 app.get('/api/items', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query('select data, updated_at from sync_state where token = $1', [req.token]);
+
+console.log('=== GET /api/items ===');
+console.log('TOKEN:', req.token);
+
+if(rows.length > 0){
+  const appointments =
+    rows[0].data?.appointments ||
+    JSON.parse(rows[0].data || '{}').appointments ||
+    [];
+
+  console.log('UPDATED_AT:', rows[0].updated_at);
+  console.log('APPOINTMENTS_COUNT:', appointments.length);
+  console.log(
+    'APPOINTMENTS_TITLES:',
+    appointments.map(x => x.title)
+  );
+} else {
+  console.log('NO ROW FOUND');
+}
     if (rows.length === 0) return res.json({ ok: true, data: { appointments: [], tasks: [] }, updatedAt: null });
     res.json({ ok: true, data: parseData(rows[0].data), updatedAt: rows[0].updated_at });
   } catch (err) {
@@ -118,6 +145,18 @@ app.get('/api/items', requireAuth, async (req, res) => {
 });
 
 app.put('/api/items', requireAuth, async (req, res) => {
+
+  console.log('=== PUT /api/items ===');
+console.log('TOKEN:', req.token);
+console.log(
+  'APPOINTMENTS_RECEIVED:',
+  (req.body.appointments || []).map(x => x.title)
+);
+console.log(
+  'TASKS_RECEIVED:',
+  (req.body.tasks || []).length
+);
+  
   const { appointments, tasks } = req.body || {};
   if (!Array.isArray(appointments) || !Array.isArray(tasks)) {
     return res.status(400).json({ ok: false, error: 'appointments e tasks devono essere array' });
