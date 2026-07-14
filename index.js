@@ -114,7 +114,13 @@ async function notifyOtherDevices(token, sourceEndpoint) {
 
 app.get('/', (req, res) => res.json({ ok: true, service: 'agenda-push-backend', version: '2.3.0' }));
 
+
 app.get('/api/items', requireAuth, async (req, res) => {
+
+  return res.json({
+  TEST: 'GET-VERSION-20260714',
+  ts: new Date().toISOString()
+});
   try {
     const { rows } = await pool.query('select data, updated_at from sync_state where token = $1', [req.token]);
 
