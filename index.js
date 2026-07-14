@@ -126,8 +126,17 @@ app.get('/api/items', requireAuth, async (req, res) => {
   ts: new Date().toISOString()
 });
   try {
-    const { rows } = await pool.query('select data, updated_at from sync_state where token = $1', [req.token]);
+const { rows } = await pool.query(
+  'select data, updated_at from sync_state where token = $1',
+  [req.token]
+);
 
+console.log('RAW ROW:', JSON.stringify(rows[0], null, 2));
+
+return res.json({
+  debug: true,
+  row: rows[0]
+});
 console.log('=== GET /api/items ===');
 console.log('TOKEN:', req.token);
 
