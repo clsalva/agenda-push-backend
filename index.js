@@ -1,4 +1,4 @@
-/* versione 2.3 */
+/* versione 2.4 */
 
 require('dotenv').config();
 console.log('=== BACKEND START ===');
