@@ -63,7 +63,10 @@ async function requireAuth(req, res, next) {
 
 //INSERIMENTO PATCH PER MULTIUTENTE
 const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || 'https://clsalva.github.io/agenda-todo/';
+const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL || 'https://agenda-push-backend.onrender.com';
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const INVITE_FROM_EMAIL = process.env.INVITE_FROM_EMAIL || 'Agenda Todo <onboarding@resend.dev>';
 
 function requireAdmin(req, res, next){
   const secret = req.header('x-admin-secret') || req.query.secret;
@@ -73,39 +76,66 @@ function requireAdmin(req, res, next){
   next();
 }
 
-function newUserToken(){
-  return crypto.randomBytes(24).toString('base64url');
+function newUserToken(){ return crypto.randomBytes(24).toString('base64url'); }
+
+function inviteEmailHtml(label, inviteUrl){
+  const safeName = String(label || 'utente').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+  return `
+  <div style="margin:0;padding:0;background:#eef2f8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;color:#171b25">
+    <div style="max-width:560px;margin:0 auto;padding:32px 18px">
+      <div style="background:rgba(255,255,255,.94);border:1px solid rgba(27,33,47,.10);border-radius:28px;padding:28px;box-shadow:0 18px 50px rgba(12,18,31,.12)">
+        <div style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:#0a84ff">Agenda Todo</div>
+        <h1 style="margin:8px 0 10px;font-size:28px;line-height:1.08;letter-spacing:-.03em">Ciao ${safeName}, la tua agenda personale è pronta</h1>
+        <p style="font-size:16px;line-height:1.55;color:#667085;margin:0 0 22px">Apri il link qui sotto per configurare automaticamente la PWA con backend, token personale e notifiche push.</p>
+        <a href="${inviteUrl}" style="display:inline-block;background:#0a84ff;color:#fff;text-decoration:none;font-weight:800;border-radius:18px;padding:15px 22px">Apri Agenda Todo</a>
+        <p style="font-size:13px;line-height:1.45;color:#8d96aa;margin:22px 0 0">Se il pulsante non funziona, copia questo link nel browser:<br><span style="word-break:break-all;color:#0a84ff">${inviteUrl}</span></p>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function sendInviteEmail({ email, label, inviteUrl }){
+  if(!RESEND_API_KEY){
+    return { sent:false, reason:'RESEND_API_KEY non configurata' };
+  }
+  const response = await fetch('https://api.resend.com/emails', {
+    method:'POST',
+    headers:{
+      'Authorization': `Bearer ${RESEND_API_KEY}`,
+      'Content-Type':'application/json'
+    },
+    body: JSON.stringify({
+      from: INVITE_FROM_EMAIL,
+      to: [email],
+      subject: 'Invito alla tua Agenda Todo personale',
+      html: inviteEmailHtml(label, inviteUrl)
+    })
+  });
+  const json = await response.json().catch(()=>({}));
+  if(!response.ok) throw new Error(json.message || 'Errore invio email');
+  return { sent:true, providerResponse: json };
 }
 
 app.post('/api/admin/invite', requireAdmin, async (req, res) => {
   try{
     const label = req.body?.label || 'utente';
+    const email = req.body?.email;
+    if(!email) return res.status(400).json({ ok:false, error:'Email mancante' });
+
     const token = newUserToken();
-
-    await pool.query(
-      `insert into app_users(token,label) values($1,$2) on conflict(token) do nothing`,
-      [token,label]
-    );
-
-    await pool.query(
-      `insert into sync_state(token,data,updated_at)
-       values($1,$2::jsonb,now())
-       on conflict(token) do nothing`,
-      [token, JSON.stringify({appointments:[], tasks:[]})]
-    );
-
-    await pool.query(
-      `insert into invites(token,label) values($1,$2)`,
-      [token,label]
-    );
+    await pool.query(`insert into app_users(token,label,email) values($1,$2,$3) on conflict(token) do nothing`, [token,label,email]);
+    await pool.query(`insert into sync_state(token,data,updated_at) values($1,$2::jsonb,now()) on conflict(token) do nothing`, [token, JSON.stringify({appointments:[], tasks:[]})]);
+    await pool.query(`insert into invites(token,label,email) values($1,$2,$3)`, [token,label,email]);
 
     const inviteUrl = `${APP_PUBLIC_URL.replace(/\/$/,'')}/?invite=${encodeURIComponent(token)}`;
-    res.json({ ok:true, token, inviteUrl });
+    const emailResult = await sendInviteEmail({ email, label, inviteUrl });
+    res.json({ ok:true, token, inviteUrl, email: emailResult });
   }catch(err){
-    console.error('Errore creazione invito', err);
-    res.status(500).json({ ok:false, error:'Errore creazione invito' });
+    console.error('Errore creazione/invio invito', err);
+    res.status(500).json({ ok:false, error: err.message || 'Errore creazione invito' });
   }
 });
+
 
 app.get('/api/bootstrap', async (req, res) => {
   const token = req.query.token;
