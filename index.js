@@ -34,14 +34,33 @@ if (publicVapidKey && privateVapidKey) {
 }
 
 const APP_TOKEN = process.env.APP_TOKEN;
-function requireAuth(req, res, next) {
+
+async function requireAuth(req, res, next) {
   const token = req.header('x-app-token');
-  if (!APP_TOKEN || !token || token !== APP_TOKEN) {
-    return res.status(401).json({ ok: false, error: 'Token mancante o non valido' });
+
+  if (!token) {
+    return res.status(401).json({ ok: false, error: 'Token mancante' });
   }
-  req.token = token;
-  next();
+
+  try {
+    const { rows } = await pool.query(
+      'select token from app_users where token = $1',
+      [token]
+    );
+
+    if (rows.length === 0 && token !== process.env.APP_TOKEN) {
+      return res.status(401).json({ ok: false, error: 'Token non valido' });
+    }
+
+    req.token = token;
+    next();
+
+  } catch (err) {
+    console.error('Errore requireAuth', err);
+    res.status(500).json({ ok: false, error: 'Errore autenticazione' });
+  }
 }
+
 //INSERIMENTO PATCH PER MULTIUTENTE
 const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || 'https://clsalva.github.io/agenda-todo/';
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
