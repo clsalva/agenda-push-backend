@@ -12,6 +12,7 @@ const express = require('express');
 const cors = require('cors');
 const webpush = require('web-push');
 const pool = require('./db');
+const crypto = require('crypto');
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -41,6 +42,70 @@ function requireAuth(req, res, next) {
   req.token = token;
   next();
 }
+//INSERIMENTO PATCH PER MULTIUTENTE
+const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || 'https://clsalva.github.io/agenda-todo/';
+const ADMIN_SECRET = process.env.ADMIN_SECRET;
+
+function requireAdmin(req, res, next){
+  const secret = req.header('x-admin-secret') || req.query.secret;
+  if(!ADMIN_SECRET || secret !== ADMIN_SECRET){
+    return res.status(401).json({ ok:false, error:'Admin secret non valido' });
+  }
+  next();
+}
+
+function newUserToken(){
+  return crypto.randomBytes(24).toString('base64url');
+}
+
+app.post('/api/admin/invite', requireAdmin, async (req, res) => {
+  try{
+    const label = req.body?.label || 'utente';
+    const token = newUserToken();
+
+    await pool.query(
+      `insert into app_users(token,label) values($1,$2) on conflict(token) do nothing`,
+      [token,label]
+    );
+
+    await pool.query(
+      `insert into sync_state(token,data,updated_at)
+       values($1,$2::jsonb,now())
+       on conflict(token) do nothing`,
+      [token, JSON.stringify({appointments:[], tasks:[]})]
+    );
+
+    await pool.query(
+      `insert into invites(token,label) values($1,$2)`,
+      [token,label]
+    );
+
+    const inviteUrl = `${APP_PUBLIC_URL.replace(/\/$/,'')}/?invite=${encodeURIComponent(token)}`;
+    res.json({ ok:true, token, inviteUrl });
+  }catch(err){
+    console.error('Errore creazione invito', err);
+    res.status(500).json({ ok:false, error:'Errore creazione invito' });
+  }
+});
+
+app.get('/api/bootstrap', async (req, res) => {
+  const token = req.query.token;
+  if(!token) return res.status(400).json({ ok:false, error:'Token mancante' });
+
+  const { rows } = await pool.query('select token from app_users where token=$1', [token]);
+  if(rows.length === 0) return res.status(404).json({ ok:false, error:'Invito non valido' });
+
+  await pool.query('update invites set used_at=coalesce(used_at,now()) where token=$1', [token]);
+
+  res.json({
+    ok:true,
+    config:{
+      backendUrl: process.env.PUBLIC_BACKEND_URL || 'https://agenda-push-backend.onrender.com',
+      appToken: token,
+      publicVapidKey: process.env.PUBLIC_VAPID_KEY
+    }
+  });
+});
 
 function requireCronSecret(req, res, next) {
   const secret = req.query.secret || req.header('x-cron-secret');
